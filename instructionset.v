@@ -1,10 +1,43 @@
-module instructions(
-
+module Memory(
+    input clk,
+    input [31:0] mem_addr,
+    output [31:0] mem_rdata,
+    input mem_rstrb // goes high when processor wants to read
 );
-
-reg [31:0] instr;   // current instructions
 reg [31:0] MEM [0:255];
 
+/// taken from femtoRV
+// `include "riscv_assembly.v"
+//    integer L0_=8;
+//    initial begin
+//                   ADD(x1,x0,x0);
+//                   ADDI(x2,x0,31);
+//       Label(L0_); ADDI(x1,x1,1);
+//                   BNE(x1, x2, LabelRef(L0_));
+//                   EBREAK();
+//       endASM();  
+//    end           
+
+
+
+always @(posedge clk) begin
+    if (mem_rstrb) begin
+        mem_rdata <= MEM[mem_addr[31:2]]; //31:2 for byte adress
+    end
+end
+
+endmodule
+
+module Processor(
+    input clk,
+    input resetn,
+    output [31:0] mem_addr,
+    input [31:0] mem_rdata,
+    output mem_rstrb,
+    output reg [31:0] x1
+)
+
+reg [31:0] instr;   // current instructions
 // instructions grouped, all of these reperesnt the 7:0 opcode
 
 wire isALUreg = {instr[6:0] == 7'b0110011}; // rd <- rs1 OP rs2
@@ -93,8 +126,10 @@ wire nextPC =   isJAL ? PC + Jimm :
 
 reg [31:0] RegisterBank [0:31];
 localparam FETCH_INSTR=0;
-localparam FETCH_REGS=1;
-localparam EXECUTE=2;
+localparam WAIT_INSTR=1;
+localparam FETCH_REGS=2;
+localparam EXECUTE=3;
+
 reg [1:0] state = FETCH_INSTR;
 
 
@@ -107,12 +142,14 @@ always @(posedge clk) begin
     end
 
 
-
-
     // state machine
     case (state)
         FETCH_INSTR: begin
-            instr <= MEM[PC[31:2]];
+            state <= WAIT_INSTR;
+            
+        end
+        WAIT_INSTR: begin
+            instr <= mem_rdata;
             state <= FETCH_REGS;
         end
         FETCH_REGS: begin
@@ -121,16 +158,64 @@ always @(posedge clk) begin
             state <= EXECUTE;
         end
         EXECUTE: begin
+            if (!isSYSTEM) begin
             PC <= nextPC;
+            end
             state <= FETCH_INSTR;
         end
     endcase
 
 end
 
-
+assign mem_addr = PC;
+assign mem_rstrb = (state == FETCH_INSTR);
 
 endmodule
 
 
 
+module SOC(
+    input CLK,
+    input RESET,
+    input [4:0] LEDS,
+    input RXD,
+    output TXD,
+)
+wire clk;
+wire resetn;
+
+Memory RAM(
+    .clk(clk),
+    .mem_addr(mem_addr),
+    .mem_rdata(mem_rdata),
+    .mem_rstrb(mem_rstrb)
+);
+
+wire [31:0] mem_addr;
+wire [31:0] mem_rdata;
+wire mem_rstrb;
+
+Processor CPU(
+    .clk(clk),
+    .resetn(resetn),
+    .mem_addr(mem_addr),
+    .mem_rdata(mem_rdata),
+    .mem_rstrb(mem_rstrb),
+    ,x1(x1)
+);
+
+assign LEDS = x1[4:0];
+
+// TAKE THIS MODULE FROM FEMTORV
+
+Clockworks #(
+     .SLOW(19) // Divide clock frequency by 2^19
+   ) CW (
+     .CLK(CLK),
+     .RESET(RESET),
+     .clk(clk),
+     .resetn(resetn)
+   );
+
+   assign TXD  = 1'b0;
+endmodule
