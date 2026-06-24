@@ -3,27 +3,45 @@ module Memory(
     input [31:0] mem_addr,
     output [31:0] mem_rdata,
     input mem_rstrb // goes high when processor wants to read
+    input [31:0] mem_wdata,
+    input [3:0] mem_wmask
 );
 reg [31:0] MEM [0:255];
 
-/// taken from femtoRV
-// `include "riscv_assembly.v"
-//    integer L0_=8;
-//    initial begin
-//                   ADD(x1,x0,x0);
-//                   ADDI(x2,x0,31);
-//       Label(L0_); ADDI(x1,x1,1);
-//                   BNE(x1, x2, LabelRef(L0_));
-//                   EBREAK();
-//       endASM();  
-//    end           
+`include "riscv_assembly.v"
+   integer L0_   = 4;
+   integer wait_ = 20;
+   integer L1_   = 28;
+   
+   initial begin
+      LI(a0,0);
+   Label(L0_); 
+      ADDI(a0,a0,1);
+      CALL(LabelRef(wait_)); 
+      J(LabelRef(L0_)); 
+      
+      EBREAK();
 
+   Label(wait_);
+      LI(a1,1);
+      SLLI(a1,a1,slow_bit);
+   Label(L1_);
+      ADDI(a1,a1,-1);
+      BNEZ(a1,LabelRef(L1_));
+      RET();
+	  
+      endASM();
+   end
 
-
+wire [29:0] word_addr = mem_addr[31:2];
 always @(posedge clk) begin
     if (mem_rstrb) begin
         mem_rdata <= MEM[mem_addr[31:2]]; //31:2 for byte adress
     end
+    if(mem_wmask[0]) MEM[word_addr][ 7:0 ] <= mem_wdata[ 7:0 ];
+    if(mem_wmask[1]) MEM[word_addr][15:8 ] <= mem_wdata[15:8 ];
+    if(mem_wmask[2]) MEM[word_addr][23:16] <= mem_wdata[23:16];
+    if(mem_wmask[3]) MEM[word_addr][31:24] <= mem_wdata[31:24];
 end
 
 endmodule
@@ -34,7 +52,9 @@ module Processor(
     output [31:0] mem_addr,
     input [31:0] mem_rdata,
     output mem_rstrb,
-    output reg [31:0] x1
+    output [31:0] mem_wdata,
+    output [3:0] mem_wmask,
+    output reg [31:0] x10 = 0
 )
 
 reg [31:0] instr;   // current instructions
@@ -73,35 +93,61 @@ wire [31:0] Uimm={{12{instr[31]}}, instr[19:12], instr[20], instr[30:21],1'b0};
 // The ALU
 
 wire aluIn1 = rs1;
-wire aluIn2 = isAlureg ? rs2 : Iimm;
+wire aluIn2 = isAlureg|isBranch ? rs2 : Iimm;
 reg [31:0] aluOut;
 reg [4:0] shamt = isALureg ? rs2[4:0] : instr[24:20];
 
+// optimization
+
+wire [32:0] aluMinus =  {1'b0,aluIn1} + {1'b1, ~aluIn2}+ 33'b1; 
+wire [31:0] aluPlus = aluIn1 + aluIn2;
+
+wire EQ = (aluMinus == 0);
+wire LTU = (aluMinus[32]);
+wire LT = (aluIn1[31] ^ aluIn2[31]) ? aluin1[31] : aluMinus[32];
+
+function [31:0] flip32;
+    input [31:0] x;
+    flip32 = {x[ 0], x[ 1], x[ 2], x[ 3], x[ 4], x[ 5], x[ 6], x[ 7], 
+    x[ 8], x[ 9], x[10], x[11], x[12], x[13], x[14], x[15], 
+    x[16], x[17], x[18], x[19], x[20], x[21], x[22], x[23],
+    x[24], x[25], x[26], x[27], x[28], x[29], x[30], x[31]};
+endfunction
+
+wire [31:0] shifter_in = (funct3 == 3'b001) ? flip32(aluIn1) : aluIn1;
+
+/* verilator lint_off WIDTH */
+wire [31:0] shifter = 
+            $signed({instr[30] & aluIn1[31], shifter_in}) >>> aluIn2[4:0];
+   /* verilator lint_on WIDTH */
+wire [31:0] leftshift = flip32(shifter);
+
+
 always @(*) begin
     case (funct3)
-        3'b000: aluOut = (funct7[5] & instr[5]) ? (aluIn1 - aluIn2) : (aluIn1 + aluIn2);
-        3'b001: aluOut = aluIn1 << shamt;
-        3'b010: aluOut = ($signed(aluIn1) < $signed(aluIn2));
-        3'b011: aluOut = aluIn1 < aluIn2;
+        3'b000: aluOut = (funct7[5] & instr[5]) ? aluMinus[31:0] : aluPlus;
+        3'b001: aluOut = leftshift;
+        3'b010: aluOut = {31'b0, LT};
+        3'b011: aluOut = {31'b0, LTU};
         3'b100: aluOut = aluIn1 ^ aluIn2;
-        3'b101: aluOut = funct7[5] ? ($signed(aluIn1) >>> shamt): (aluIn1 >> shamt);
+        3'b101: aluOut = shifter;
         3'b110: aluOut = aluIn1 | aluIn2;
         3'b111: aluOut = aluIn1 & aluIn2;
     endcase
 end
 
 // Jumps
-reg takebranch;
+reg takeBranch;
 
 always @(*) begin
     case (funct3)
-        3'b000: takebranch = (rs1 == rs2);
-        3'b001: takebranch = (rs1 != rs2);
-        3'b010: takebranch = ($signed(rs1) < $signed(rs2)); // signed
-        3'b101: takebranch = ($signed(rs1) >= signed(rs2)); // signed
-        3'b110: takebranch = (rs1 < rs2);  
-        3'b111: takebranch = (rs1 >= rs2); 
-
+        3'b000: takeBranch = EQ;
+        3'b001: takeBranch = !EQ;
+        3'b010: takeBranch = LT; // signed
+        3'b101: takeBranch = !LT; // signed
+        3'b110: takeBranch = LTU;  
+        3'b111: takeBranch = !LTU; 
+        default: takeBranch = 1'b0;
     endcase
 end
 
@@ -110,18 +156,61 @@ end
 
 
 
-wire [31:0] writeBackData = (isJAL || isJALR) ? (PC+4): aluout;
-wire writeBackEn = (state == EXECUTE && 
-                    (
-                    isAlureg || 
-                    isALUimm ||
-                    isJAL ||
-                    is JALR ||
-                    )
-                        );
-wire nextPC =   isJAL ? PC + Jimm : 
-                isJALR ? rs1 + Iimm : 
-                PC + 4;
+wire [31:0] writeBackData = (isJAL || isJALR) ? PCplus4 :
+			                isLUI         ? Uimm :
+			                isAUIPC       ? PCplusImm : 
+			                aluOut;
+wire writeBackEn = (state == EXECUTE && !isBranch && !isStore && !isLoad) || (state == WAIT_DATA);
+
+wire [31:0] PCplusImm = PC + ( instr[3] ? Jimm[31:0] :
+				        instr[4] ? Uimm[31:0] :
+				        Bimm[31:0] );
+
+
+
+wire [31:0] PCplus4 = PC+4;
+wire [31:0] nextPC =    ((isBranch && takeBranch) || isJAL) ? PCplusImm  :	       
+	                    isJALR                              ? {aluPlus[31:1],1'b0}:
+	                    PCplus4;
+
+
+
+wire [31:0] loadstore_addr = rs1 + (isStore ? Simm : Iimm);
+
+// LOAD 
+wire mem_byteAccess     = funct3[1:0] == 2'b00;
+wire mem_halfwordAccess = funct3[1:0] == 2'b01; 
+
+wire [15:0] LOAD_halfword =
+        loadstore_addr[1] ? mem_rdata[31:16] : mem_rdata[15:0];
+
+wire  [7:0] LOAD_byte =
+        loadstore_addr[0] ? LOAD_halfword[15:8] : LOAD_halfword[7:0];
+
+wire LOAD_sign = !funct3[2] & (mem_byteAccess ? LOAD_byte[7] : LOAD_halfword[15]);
+
+wire [31:0] LOAD_data =
+    mem_byteAccess ? {{24{LOAD_sign}}, LOAD_byte}     :
+    mem_halfwordAccess ? {{16{LOAD_sign}}, LOAD_halfword} :
+                        mem_rdata     ;
+
+// STORE
+
+assign mem_wdata[ 7: 0] = rs2[7:0];
+assign mem_wdata[15: 8] = loadstore_addr[0] ? rs2[7:0]  : rs2[15: 8];
+assign mem_wdata[23:16] = loadstore_addr[1] ? rs2[7:0]  : rs2[23:16];
+assign mem_wdata[31:24] = loadstore_addr[0] ? rs2[7:0]  :
+                loadstore_addr[1] ? rs2[15:8] : rs2[31:24];
+
+wire [3:0] STORE_wmask =
+        mem_byteAccess      ?
+            (loadstore_addr[1] ?
+                (loadstore_addr[0] ? 4'b1000 : 4'b0100) :
+                (loadstore_addr[0] ? 4'b0010 : 4'b0001)
+                ) :
+        mem_halfwordAccess ?
+            (loadstore_addr[1] ? 4'b1100 : 4'b0011) :
+            4'b1111;    
 
 
 reg [31:0] RegisterBank [0:31];
@@ -129,18 +218,25 @@ localparam FETCH_INSTR=0;
 localparam WAIT_INSTR=1;
 localparam FETCH_REGS=2;
 localparam EXECUTE=3;
+localparam LOAD=4;
+localparam WAIT_DATA=5;
+localparam STORE=6;
 
-reg [1:0] state = FETCH_INSTR;
+reg [2:0] state = FETCH_INSTR;
 
 
 always @(posedge clk) begin
+
+    if(!resetn) begin
+	 PC    <= 0;
+	 state <= FETCH_INSTR;
+    end else begin
 
     //write back
 
     if (writeBackEn && (rdId != 0)) begin
         RegisterBank[rdId] = writeBackData;
     end
-
 
     // state machine
     case (state)
@@ -158,17 +254,30 @@ always @(posedge clk) begin
             state <= EXECUTE;
         end
         EXECUTE: begin
-            if (!isSYSTEM) begin
+            if (!isSYSTEM)  begin
             PC <= nextPC;
             end
+            state <=    isLoad ? LOAD : 
+                        isStore ? STORE:
+                        FETCH_INSTR;
+        end
+        LOAD: begin
+	        state <= WAIT_DATA;
+	    end
+	    WAIT_DATA: begin
+	        state <= FETCH_INSTR;
+        end
+        STORE: begin
             state <= FETCH_INSTR;
         end
     endcase
-
+    end 
 end
 
-assign mem_addr = PC;
-assign mem_rstrb = (state == FETCH_INSTR);
+assign mem_addr = (state == WAIT_INSTR || state == FETCH_INSTR) ?
+		     PC : loadstore_addr ;
+assign mem_rstrb = (state == FETCH_INSTR || state == LOAD);
+assign mem_wmask = {4{(state == STORE)}} & STORE_wmask;
 
 endmodule
 
@@ -177,23 +286,20 @@ endmodule
 module SOC(
     input CLK,
     input RESET,
-    input [4:0] LEDS,
+    output reg [4:0] LEDS,
     input RXD,
     output TXD,
 )
 wire clk;
 wire resetn;
 
-Memory RAM(
-    .clk(clk),
-    .mem_addr(mem_addr),
-    .mem_rdata(mem_rdata),
-    .mem_rstrb(mem_rstrb)
-);
-
 wire [31:0] mem_addr;
 wire [31:0] mem_rdata;
 wire mem_rstrb;
+wire [31:0] mem_wdata;
+wire [3:0] mem_wmask;
+
+
 
 Processor CPU(
     .clk(clk),
@@ -201,21 +307,75 @@ Processor CPU(
     .mem_addr(mem_addr),
     .mem_rdata(mem_rdata),
     .mem_rstrb(mem_rstrb),
-    ,x1(x1)
+    .mem_wdata(mem_wdata),
+    .mem_wmask(mem_wmask),
 );
 
-assign LEDS = x1[4:0];
+wire [31:0] RAM_rdata;
+wire [29:0] mem_wordaddr = mem_addr[31:2];
+wire isIO = mem_addr[22];
+wire isRAM = !isIO;
+wire mem_wstrb = |mem_wmask;
 
-// TAKE THIS MODULE FROM FEMTORV
+Memory RAM(
+    .clk(clk),
+    .mem_addr(mem_addr),
+    .mem_rdata(RAM_rdata),
+    .mem_rstrb(isRAM & mem_rstrb),
+    .mem_wdata(mem_wdata),
+    .mem_wmask({4{isRAM}}&mem_wmask)
+);
 
-Clockworks #(
-     .SLOW(19) // Divide clock frequency by 2^19
-   ) CW (
+localparam IO_LEDS_bit      = 0;  // W five leds
+localparam IO_UART_DAT_bit  = 1;  // W data to send (8 bits)
+localparam IO_UART_CNTL_bit = 2;  // R status. bit 9: busy sending
+
+always @(posedge clk) begin
+    if(isIO & mem_wstrb & mem_wordaddr[IO_LEDS_bit]) begin
+    LEDS <= mem_wdata;
+    end
+end
+
+wire uart_valid = isIO & mem_wstrb & mem_wordaddr[IO_UART_DAT_bit];
+wire uart_ready;
+
+
+corescore_emitter_uart #(
+    .clk_freq_hz(`CPU_FREQ*1000000)
+) UART(
+    .i_clk(clk),
+    .i_rst(!resetn),
+    .i_data(mem_wdata[7:0]),
+    .i_valid(uart_valid),
+    .o_ready(uart_ready),
+    .o_uart_tx(TXD)
+);
+
+wire [31:0] IO_rdata =
+        mem_wordaddr[IO_UART_CNTL_bit] ? { 22'b0, !uart_ready, 9'b0}
+                                        : 32'b0;
+
+assign mem_rdata = isRAM ? RAM_rdata :
+                        IO_rdata ;
+
+
+`ifdef BENCH
+   always @(posedge clk) begin
+      if(uart_valid) begin
+	 $write("%c", mem_wdata[7:0] );
+	 $fflush(32'h8000_0001);
+      end
+   end
+`endif
+
+// TAKE THIS MODULE FROM FemtoRV
+
+Clockworks CW (
      .CLK(CLK),
      .RESET(RESET),
      .clk(clk),
      .resetn(resetn)
    );
 
-   assign TXD  = 1'b0;
+   assign TXD  = 1'b0;  // not used for now
 endmodule
