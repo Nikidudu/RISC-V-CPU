@@ -130,15 +130,15 @@ reg [31:0] PC = 0;
 reg [31:0] instr;   // current instructions
 // instructions grouped, all of these reperesnt the 7:0 opcode
 
-wire isALUreg = {instr[6:0] == 7'b0110011}; // rd <- rs1 OP rs2
-wire isALUimm = {instr[6:0] == 7'b0010011}; // rd <- rs1 OP Iimm
-wire isBranch = {instr[6:0] == 7'b1100011}; // if(rs1 OP rs2) PC <- PC + Bimm
-wire isLoad = {instr[6:0] == 7'b0000011}; // rd <- mem[rs1+Iimm]
-wire isStore = {instr[6:0] == 7'b0100011}; // mem[rs1+Simm] <- rs2
-wire isLUI = {instr[6:0] == 7'b0110111}; // rd <- Uimm
-wire isAUIPC = {instr[6:0] == 7'b0010111}; // rd <- PC + Uimm
-wire isSYSTEM = {instr[6:0] == 7'1110011}; 
-wire isJAL = {instr[6:0] == 7'1101111}; // rd <- PC+4; PC<-PC+Jimm
+wire isALUreg = (instr[6:0] == 7'b0110011); // rd <- rs1 OP rs2
+wire isALUimm = (instr[6:0] == 7'b0010011); // rd <- rs1 OP Iimm
+wire isBranch = (instr[6:0] == 7'b1100011); // if(rs1 OP rs2) PC <- PC + Bimm
+wire isLoad = (instr[6:0] == 7'b0000011); // rd <- mem[rs1+Iimm]
+wire isStore = (instr[6:0] == 7'b0100011); // mem[rs1+Simm] <- rs2
+wire isLUI = (instr[6:0] == 7'b0110111); // rd <- Uimm
+wire isAUIPC = (instr[6:0] == 7'b0010111); // rd <- PC + Uimm
+wire isSYSTEM = (instr[6:0] == 7'1110011); 
+wire isJAL = (instr[6:0] == 7'1101111); // rd <- PC+4; PC<-PC+Jimm
 wire isJALR =  (instr[6:0] == 7'b1100111); // rd <- PC+4; PC<-rs1+Iimm
 
 
@@ -269,14 +269,14 @@ wire [31:0] nextPC = ((isBranch && takeBranch) || isJAL) ? PCplusImm   :
 wire [31:0] loadstore_addr = rs1 + (isStore ? Simm : Iimm);
 
 // LOAD 
-wire mem_byteAccess     = funct3[1:0] == 2'b00;
-wire mem_halfwordAccess = funct3[1:0] == 2'b01; 
+wire mem_byteAccess     = funct3[1:0] == 2'b00; // check which byte adress, 
+wire mem_halfwordAccess = funct3[1:0] == 2'b01; // check which halfword adress
 
-wire [15:0] LOAD_halfword = loadstore_addr[1] ? mem_rdata[31:16] : mem_rdata[15:0];
+wire [15:0] LOAD_halfword = loadstore_addr[1] ? mem_rdata[31:16] : mem_rdata[15:0]; // First select either upper word or lower halfword
 
-wire  [7:0] LOAD_byte = loadstore_addr[0] ? LOAD_halfword[15:8] : LOAD_halfword[7:0];
+wire  [7:0] LOAD_byte = loadstore_addr[0] ? LOAD_halfword[15:8] : LOAD_halfword[7:0]; // Then select either upper byte or lower byte
 
-wire LOAD_sign = !funct3[2] & (mem_byteAccess ? LOAD_byte[7] : LOAD_halfword[15]);
+wire LOAD_sign = !funct3[2] & (mem_byteAccess ? LOAD_byte[7] : LOAD_halfword[15]); // Check if the load is signed or unsigned, if signed then check the sign bit of the byte or halfword
 
 wire [31:0] LOAD_data =
     mem_byteAccess ? {{24{LOAD_sign}}, LOAD_byte}     :
@@ -284,6 +284,10 @@ wire [31:0] LOAD_data =
                         mem_rdata     ;
 
 // STORE
+// idk why he decided to duplicate rs2, this is becasue we take the whole of wdata, 
+// and we can write to any byte word if needed
+// ex: store x44 into 0100, changes the whole thing into x44444444, so x11223344 = x11443344
+// only if we are going to store halfword, then we have to take the other word, x3344, so it becomes x33443344 etc...
 
 assign mem_wdata[ 7: 0] = rs2[7:0];
 assign mem_wdata[15: 8] = loadstore_addr[0] ? rs2[7:0]  : rs2[15: 8];
